@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import path from 'node:path';
 import { logger, ensureDir } from './utils/logger.js';
-import { extractImageUuids, downloadImagesFromPage, safeFilename } from './utils/downloader.js';
+import { extractImageUuids, extractVideoUuids, downloadImagesFromPage, downloadVideosFromPage, safeFilename } from './utils/downloader.js';
 
 const IMG_UUIDS_BEFORE_GEN = new Set();
 
@@ -18,6 +18,13 @@ export const IMAGE_MODELS = [
   { id: 'nano-banana-2', label: 'Nano Banana 2' },
   { id: 'nano-banana-pro', label: 'Nano Banana Pro' },
   { id: 'imagen-4', label: 'Imagen 4' },
+];
+
+export const VIDEO_ASPECT_RATIOS = ['16:9', '9:16'];
+export const VIDEO_MODELS = [
+  { id: 'omni-flash', label: 'Omni Flash' },
+  { id: 'veo-3', label: 'Veo 3' },
+  { id: 'veo-3.1', label: 'Veo 3.1' },
 ];
 
 async function sleep(ms) {
@@ -225,6 +232,236 @@ export async function generateImage({ browser, config, prompt, model, aspectRati
     jobId,
     model: model || 'nano-banana-2',
     aspectRatio: aspectRatio || 'default',
+    prompt,
+    files: files.map((f) => ({ path: f.path, bytes: f.bytes, uuid: f.uuid })),
+  };
+}
+
+// ============================================================================
+// VIDEO (storyboard workflow)
+// ============================================================================
+//
+// Flow's storyboard is a multi-step agent workflow:
+//   1. Click "Develop a storyboard" chip (or any storyboard-related chip — Flow
+//      rotates the chip labels between sessions)
+//   2. Send prompt; agent creates a Frame N plan
+//   3. Send confirmation ("Looks good, generate all videos.")
+//   4. Agent calls Veo for each Frame; <video> elements appear with src URLs
+//   5. Download each .mp4 via the same media.getMediaUrlRedirect endpoint
+//
+// Settings → "Never" makes the agent auto-skip the confirmation prompt, but
+// in practice the "go" follow-up is still required because the agent pauses
+// after the plan to let the user inspect it.
+// ============================================================================
+
+async function clickStoryboardChip(page) {
+  // Order matters: prefer creation chips over editing chips.
+  // "Edit a video with Omni" requires an existing video and will fail with
+  // "Something went wrong" if the project is empty.
+  const preferPatterns = [
+    /develop a storyboard/i,
+    /build.*storyboard/i,
+    /storyboard/i,
+    /create.*scenes?/i,
+    /cinemat/i,
+  ];
+  const skipPatterns = [
+    /^edit a video/i,
+    /^edit an image/i,
+    /^organize/i,
+    /^turn a concept/i,
+  ];
+  const all = await page.locator('button').evaluateAll((els) =>
+    els
+      .map((e, idx) => ({ idx, text: e.textContent?.trim() || '', aria: e.getAttribute('aria-label') || '' }))
+      .filter((b) => b.text && b.text.length > 0 && b.text.length < 80)
+  );
+  // First pass: prefer patterns
+  for (const b of all) {
+    if (skipPatterns.some((re) => re.test(b.text))) continue;
+    for (const re of preferPatterns) {
+      if (re.test(b.text) || re.test(b.aria)) {
+        const btn = page.locator('button').nth(b.idx);
+        try {
+          await btn.click({ timeout: 3000 });
+          logger.info('clicked storyboard chip', { text: b.text });
+          return true;
+        } catch {}
+      }
+    }
+  }
+  return false;
+}
+
+async function configureVideoDefaults(page, aspectRatio, count) {
+  const settingsBtn = page.locator('button:has-text("tuneSettings")').first();
+  try {
+    if (!(await settingsBtn.isVisible({ timeout: 1500 }))) return false;
+    await settingsBtn.click();
+    await sleep(1500);
+
+    // Pick aspect ratio (16:9 / 9:16 buttons under "Video generation default")
+    const aspectBtn = page.locator(`button:has-text("${aspectRatio}")`).last();
+    if (await aspectBtn.isVisible({ timeout: 1000 }).catch(() => false)) {
+      await aspectBtn.click();
+      logger.info('video aspect set', { aspectRatio });
+    }
+
+    // Pick count (1x / 2x / 3x / 4x)
+    const countBtn = page.locator(`button:has-text("${count}x")`).last();
+    if (await countBtn.isVisible({ timeout: 1000 }).catch(() => false)) {
+      await countBtn.click();
+      logger.info('video count set', { count });
+    }
+
+    // Set Never for confirmation
+    const never = page.locator('text=Never').first();
+    if (await never.isVisible({ timeout: 1000 }).catch(() => false)) {
+      await never.click();
+    }
+
+    await page.locator('button:has-text("Save")').first().click();
+    await sleep(1500);
+    return true;
+  } catch (e) {
+    logger.warn('configureVideoDefaults failed', { err: e.message });
+    return false;
+  }
+}
+
+async function sendChatMessage(page, text) {
+  const input = page.locator('[role="textbox"]').first();
+  await input.click();
+  await sleep(300);
+  await input.fill(text);
+  await sleep(300);
+  await page.keyboard.press('Enter');
+  await sleep(1500);
+  // If still has text, click arrow_forward as fallback
+  const stillThere = await input.textContent().catch(() => null);
+  if (stillThere && stillThere.trim() === text) {
+    const sendBtn = page.locator('button:has(i:text("arrow_forward")):not([aria-disabled="true"])').last();
+    try {
+      await sendBtn.click({ timeout: 3000 });
+      await sleep(1000);
+    } catch (e) {
+      throw new FlowError('CHAT_SEND_FAILED', 'Could not send chat message: ' + e.message);
+    }
+  }
+}
+
+async function detectAgentError(page) {
+  const errCount = await page.locator('text=/went wrong|sorry,|unable to|error occurred/i').count();
+  return errCount > 0;
+}
+
+async function waitForPlanResponse(page, timeoutMs) {
+  const start = Date.now();
+  while (Date.now() - start < timeoutMs) {
+    if (await detectAgentError(page)) {
+      throw new FlowError('AGENT_ERROR', 'Flow agent returned an error response (rate limit or service issue). Try again later.');
+    }
+    const planCount = await page.locator('text=/frame \\d|scene \\d|ready to go|move on|generating the visual|proceed/i').count();
+    if (planCount > 0) {
+      logger.info('plan response detected', { waitedMs: Date.now() - start });
+      return true;
+    }
+    await sleep(3000);
+  }
+  return false;
+}
+
+async function waitForVideos(page, timeoutMs, pollMs) {
+  const start = Date.now();
+  let lastCount = 0;
+  while (Date.now() - start < timeoutMs) {
+    if (await detectAgentError(page)) {
+      throw new FlowError('AGENT_ERROR', 'Agent errored while generating videos.');
+    }
+    const uuids = await extractVideoUuids(page);
+    if (uuids.length > lastCount) {
+      logger.info('new video UUIDs', { count: uuids.length, waited: Date.now() - start });
+      lastCount = uuids.length;
+    }
+    if (uuids.length > 0) {
+      // verify each has a non-blank src already
+      const allReady = await page.evaluate((reSrc) => {
+        const re = new RegExp(reSrc, 'i');
+        const videos = document.querySelectorAll('video');
+        let ready = 0;
+        for (const v of videos) {
+          const src = v.src || v.currentSrc || '';
+          if (re.test(src) && v.readyState >= 1) ready++;
+        }
+        return ready;
+      }, REDIRECT_RE.source);
+      if (allReady >= uuids.length) {
+        logger.info('all videos ready', { count: uuids.length });
+        return uuids;
+      }
+    }
+    await sleep(pollMs);
+  }
+  throw new FlowError('VIDEO_GENERATION_TIMEOUT', `No videos ready after ${Math.round(timeoutMs / 1000)}s`);
+}
+
+const REDIRECT_RE_SRC = 'media\\.getMediaUrlRedirect\\?name=([a-f0-9-]+)';
+const REDIRECT_RE = new RegExp(REDIRECT_RE_SRC, 'i');
+
+export async function generateVideo({ browser, config, prompt, aspectRatio = '16:9', count = 1, outputDir }) {
+  if (!prompt || typeof prompt !== 'string') {
+    throw new FlowError('INVALID_PROMPT', 'Prompt must be a non-empty string');
+  }
+  if (!VIDEO_ASPECT_RATIOS.includes(aspectRatio)) {
+    throw new FlowError('INVALID_ASPECT', `Aspect must be one of ${VIDEO_ASPECT_RATIOS.join(', ')}`);
+  }
+  if (![1, 2, 3, 4].includes(count)) {
+    throw new FlowError('INVALID_COUNT', 'Count must be 1, 2, 3, or 4');
+  }
+
+  const page = await browser.ensurePage();
+  const outDir = outputDir || config.outputDir;
+  ensureDir(outDir);
+
+  const jobId = randomUUID().slice(0, 8);
+  logger.info('video job start', { jobId, prompt: prompt.slice(0, 80), aspectRatio, count });
+
+  await goToNewProject(page, config.flowUrl);
+  await configureVideoDefaults(page, aspectRatio, count);
+
+  const chipClicked = await clickStoryboardChip(page);
+  if (!chipClicked) {
+    logger.warn('no storyboard chip found, sending direct chat prompt');
+  }
+  await sleep(1000);
+
+  await sendChatMessage(page, prompt);
+  logger.info('prompt sent, waiting for agent plan');
+
+  const planOk = await waitForPlanResponse(page, 180000);
+  if (!planOk) {
+    throw new FlowError('PLAN_TIMEOUT', 'Agent did not produce a storyboard plan within 3 minutes');
+  }
+  await sleep(2000);
+
+  // Send confirmation to trigger video generation
+  await sendChatMessage(page, 'Looks great. Please generate the videos now.');
+  logger.info('confirmation sent, waiting for videos');
+
+  // Video generation can take 1-5 min per scene
+  const videoTimeoutMs = Math.max(config.generationTimeoutMs, 480000);
+  const uuids = await waitForVideos(page, videoTimeoutMs, config.pollIntervalMs);
+  const files = await downloadVideosFromPage(page, uuids, outDir, jobId);
+
+  if (files.length === 0) {
+    throw new FlowError('VIDEO_DOWNLOAD_FAILED', 'Videos were generated but download failed');
+  }
+
+  logger.info('video job done', { jobId, count: files.length });
+  return {
+    jobId,
+    aspectRatio,
+    count,
     prompt,
     files: files.map((f) => ({ path: f.path, bytes: f.bytes, uuid: f.uuid })),
   };

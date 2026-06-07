@@ -4,6 +4,8 @@ data/cookies-import.json
 data/debug-*.png
 data/http*.log
 data/http*.err
+data/*.png
+data/storyboard*/
 output/*
 !output/.gitkeep
 .env

@@ -4,8 +4,9 @@ import fs from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { config as loadConfig } from 'dotenv';
 import { getBrowser, closeBrowser } from '../src/browser.js';
-import { generateImage, IMAGE_MODELS, ASPECT_RATIOS } from '../src/flow.js';
+import { generateImage, IMAGE_MODELS, ASPECT_RATIOS, VIDEO_MODELS, VIDEO_ASPECT_RATIOS } from '../src/flow.js';
 import { logger, ensureDir } from '../src/utils/logger.js';
+import { withBrowser } from './_runner.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const projectRoot = path.resolve(__dirname, '..');
@@ -37,6 +38,7 @@ function usage() {
   console.log('  flow-api test "<prompt>"    Generate a single image from CLI');
   console.log('  flow-api serve              Start MCP server (stdio)');
   console.log('  flow-api serve-http [port]  Start MCP server over HTTP (default :5555)');
+  console.log('  flow-api cleanup            Kill stuck Chrome + remove profile locks');
   console.log('  flow-api --help             Show this help');
   console.log('');
   console.log('Config: ' + path.join(projectRoot, '.env'));
@@ -47,6 +49,16 @@ function usage() {
 async function cmdLogin() {
   ensureDir(config.chromeProfileDir);
   const browser = getBrowser(config);
+  const exiting = { v: false };
+  const shutdown = async () => {
+    if (exiting.v) return;
+    exiting.v = true;
+    console.log('\nSaving session and exiting...');
+    await browser.close().catch(() => {});
+    process.exit(0);
+  };
+  process.on('SIGINT', shutdown);
+  process.on('SIGTERM', shutdown);
   await browser.launch({ headed: true });
   const page = await browser.ensurePage();
   await page.goto(config.flowUrl, { waitUntil: 'domcontentloaded' });
@@ -54,22 +66,16 @@ async function cmdLogin() {
   console.log('Please sign in to your Google account in the window.');
   console.log('After signing in, you can close the browser - the session will be saved.');
   console.log('Press Ctrl+C to exit.');
-  process.on('SIGINT', async () => {
-    console.log('\nSaving session and exiting...');
-    await browser.close();
-    process.exit(0);
-  });
   await new Promise(() => {});
 }
 
 async function cmdStatus() {
-  const browser = getBrowser(config);
-  const status = await browser.isLoggedIn();
-  console.log(JSON.stringify({ ...status, models: IMAGE_MODELS, aspectRatios: ASPECT_RATIOS }, null, 2));
-  await browser.close();
-  if (!status.loggedIn) {
-    process.exit(1);
-  }
+  const result = await withBrowser(async (browser) => {
+    const status = await browser.isLoggedIn();
+    return { ...status, models: IMAGE_MODELS, aspectRatios: ASPECT_RATIOS, videoModels: VIDEO_MODELS, videoAspectRatios: VIDEO_ASPECT_RATIOS };
+  });
+  console.log(JSON.stringify(result, null, 2));
+  if (!result.loggedIn) process.exit(1);
 }
 
 async function cmdTest(prompt) {
@@ -77,13 +83,14 @@ async function cmdTest(prompt) {
     console.error('Usage: flow-api test "<prompt>"');
     process.exit(1);
   }
-  const browser = getBrowser(config);
-  const result = await generateImage({ browser, config, prompt });
+  const files = await withBrowser(async (browser) => {
+    const result = await generateImage({ browser, config, prompt });
+    return result.files;
+  });
   console.log('OK - generated:');
-  for (const f of result.files) {
+  for (const f of files) {
     console.log('  ' + f.path + ' (' + f.bytes + ' bytes)');
   }
-  await browser.close();
 }
 
 async function cmdServe() {
@@ -102,6 +109,10 @@ async function cmdImportCookies() {
   await import('./import-cookies.js');
 }
 
+async function cmdCleanup() {
+  await import('./cleanup.js');
+}
+
 const args = process.argv.slice(2);
 const cmd = args[0];
 
@@ -118,6 +129,7 @@ const cmd = args[0];
       case 'test': return cmdTest(args.slice(1).join(' '));
       case 'serve': return cmdServe();
       case 'serve-http': return cmdServeHttp(args[1]);
+      case 'cleanup': return cmdCleanup();
       default:
         console.error('Unknown command: ' + cmd);
         usage();
@@ -125,7 +137,7 @@ const cmd = args[0];
     }
   } catch (err) {
     logger.error('cli error', { msg: err.message, stack: err.stack });
-    if (cmd === 'serve') {
+    if (cmd === 'serve' || cmd === 'serve-http') {
       process.exit(1);
     } else {
       await closeBrowser().catch(() => {});

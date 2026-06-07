@@ -1,6 +1,6 @@
 import path from 'node:path';
 import { getBrowser, closeBrowser } from './browser.js';
-import { generateImage, FlowError, IMAGE_MODELS, ASPECT_RATIOS } from './flow.js';
+import { generateImage, generateVideo, FlowError, IMAGE_MODELS, ASPECT_RATIOS, VIDEO_MODELS, VIDEO_ASPECT_RATIOS } from './flow.js';
 import { logger, ensureDir } from './utils/logger.js';
 import { toolDefinitions } from './tools/index.js';
 
@@ -58,6 +58,8 @@ export async function handleToolCall(name, args, config) {
               uptimeSec: browser.uptimeSec(),
               models: IMAGE_MODELS,
               aspectRatios: ASPECT_RATIOS,
+              videoModels: VIDEO_MODELS,
+              videoAspectRatios: VIDEO_ASPECT_RATIOS,
               config: {
                 flowUrl: config.flowUrl,
                 outputDir: config.outputDir,
@@ -97,6 +99,28 @@ export async function handleToolCall(name, args, config) {
       case 'flow_close': {
         await closeBrowser();
         return { content: [{ type: 'text', text: JSON.stringify({ ok: true, message: 'Browser closed.' }) }] };
+      }
+
+      case 'generate_video': {
+        const result = await generateVideo({
+          browser,
+          config,
+          prompt: args.prompt,
+          aspectRatio: args.aspect_ratio,
+          count: args.count,
+          outputDir: args.output_dir,
+        });
+        return {
+          content: [{
+            type: 'text',
+            text: JSON.stringify({
+              ok: true,
+              ...result,
+              files: result.files.map((f) => f.path),
+              note: 'Video generation took several minutes. Each scene produces a separate .mp4 file.',
+            }, null, 2),
+          }],
+        };
       }
 
       default:

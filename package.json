@@ -14,8 +14,11 @@
     "login": "node bin/flow-api.js login",
     "status": "node bin/flow-api.js status",
     "import-cookies": "node bin/flow-api.js import-cookies",
+    "cleanup": "node bin/flow-api.js cleanup",
     "test": "node bin/flow-api.js test",
     "test:mcp": "node bin/test-mcp.js",
+    "test:http": "node bin/test-http-inline.js",
+    "test:admin": "node bin/test-admin.js",
     "install:browsers": "playwright install chromium"
   },
   "engines": {

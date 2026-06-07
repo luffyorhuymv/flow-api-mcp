@@ -1,4 +1,4 @@
-import { ASPECT_RATIOS, IMAGE_MODELS } from '../flow.js';
+import { ASPECT_RATIOS, IMAGE_MODELS, VIDEO_ASPECT_RATIOS, VIDEO_MODELS } from '../flow.js';
 
 export const toolDefinitions = [
   {
@@ -35,10 +35,50 @@ export const toolDefinitions = [
     },
   },
   {
+    name: 'generate_video',
+    description:
+      'Generate a short cinematic video storyboard using Google Labs Flow. ' +
+      'Under the hood Flow uses an agent (Omni Flash / Veo) to plan scenes and render each one as a separate MP4. ' +
+      'This is a multi-step process: prompt → agent plan → confirmation → 1-5 min per scene. ' +
+      'Total turnaround is typically 3-15 minutes depending on the number of scenes. ' +
+      'Returns absolute file paths to the saved .mp4 files. Requires an active Google session ' +
+      'and Google AI Pro / Ultra plan (free tier is image-only).',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        prompt: {
+          type: 'string',
+          description:
+            'Text prompt describing the video story. The Flow agent will break it into 2-6 scenes and ' +
+            'generate a separate short video for each. Be specific (subject, action, mood, lighting, camera).',
+        },
+        aspect_ratio: {
+          type: 'string',
+          enum: VIDEO_ASPECT_RATIOS,
+          default: '16:9',
+          description: 'Aspect ratio for the videos. "16:9" is landscape, "9:16" is vertical (shorts).',
+        },
+        count: {
+          type: 'integer',
+          enum: [1, 2, 3, 4],
+          default: 1,
+          description:
+            'How many videos to generate per scene (Flow supports 1x-4x). Higher count = more credits.',
+        },
+        output_dir: {
+          type: 'string',
+          description: 'Override output directory for this generation.',
+        },
+      },
+      required: ['prompt'],
+      additionalProperties: false,
+    },
+  },
+  {
     name: 'flow_status',
     description:
       'Check whether the Google Flow session is valid and the browser is ready. ' +
-      'Returns { loggedIn, url, reason, uptimeSec, models, aspectRatios }.',
+      'Returns { loggedIn, url, reason, uptimeSec, models, aspectRatios, videoModels, videoAspectRatios }.',
     inputSchema: {
       type: 'object',
       properties: {},
