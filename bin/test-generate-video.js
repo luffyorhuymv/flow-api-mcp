@@ -29,7 +29,7 @@ await withBrowser(async (browser) => {
     });
     log('SUCCESS', { files: result.files });
   } catch (e) {
-    log('FAILED', { code: e.code, message: e.message });
+    log('FAILED', { code: e.code, message: e.message, extra: e.extra });
     process.exit(1);
   }
 }, { headed: false });

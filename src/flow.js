@@ -271,24 +271,28 @@ async function clickStoryboardChip(page) {
     /^organize/i,
     /^turn a concept/i,
   ];
-  const all = await page.locator('button').evaluateAll((els) =>
-    els
-      .map((e, idx) => ({ idx, text: e.textContent?.trim() || '', aria: e.getAttribute('aria-label') || '' }))
-      .filter((b) => b.text && b.text.length > 0 && b.text.length < 80)
-  );
-  // First pass: prefer patterns
-  for (const b of all) {
-    if (skipPatterns.some((re) => re.test(b.text))) continue;
-    for (const re of preferPatterns) {
-      if (re.test(b.text) || re.test(b.aria)) {
-        const btn = page.locator('button').nth(b.idx);
-        try {
-          await btn.click({ timeout: 3000 });
-          logger.info('clicked storyboard chip', { text: b.text });
-          return true;
-        } catch {}
+  // Retry up to 6x (3s total) — chips may not be in DOM immediately
+  // after project creation / settings interaction.
+  for (let attempt = 0; attempt < 6; attempt += 1) {
+    const all = await page.locator('button').evaluateAll((els) =>
+      els
+        .map((e, idx) => ({ idx, text: e.textContent?.trim() || '', aria: e.getAttribute('aria-label') || '' }))
+        .filter((b) => b.text && b.text.length > 0 && b.text.length < 80)
+    );
+    for (const b of all) {
+      if (skipPatterns.some((re) => re.test(b.text))) continue;
+      for (const re of preferPatterns) {
+        if (re.test(b.text) || re.test(b.aria)) {
+          const btn = page.locator('button').nth(b.idx);
+          try {
+            await btn.click({ timeout: 3000 });
+            logger.info('clicked storyboard chip', { text: b.text, attempt });
+            return true;
+          } catch {}
+        }
       }
     }
+    if (attempt < 5) await page.waitForTimeout(500);
   }
   return false;
 }
@@ -351,15 +355,19 @@ async function sendChatMessage(page, text) {
 }
 
 async function detectAgentError(page) {
-  const errCount = await page.locator('text=/went wrong|sorry,|unable to|error occurred/i').count();
-  return errCount > 0;
+  const errLoc = page.locator('text=/went wrong|sorry,|unable to|error occurred/i').first();
+  if ((await errLoc.count()) === 0) return null;
+  const txt = (await errLoc.textContent().catch(() => ''))?.trim() || '';
+  const fullSnippet = (await page.locator('body').innerText().catch(() => '')).slice(0, 800);
+  return { message: txt, snippet: fullSnippet };
 }
 
 async function waitForPlanResponse(page, timeoutMs) {
   const start = Date.now();
   while (Date.now() - start < timeoutMs) {
-    if (await detectAgentError(page)) {
-      throw new FlowError('AGENT_ERROR', 'Flow agent returned an error response (rate limit or service issue). Try again later.');
+    const err = await detectAgentError(page);
+    if (err) {
+      throw new FlowError('AGENT_ERROR', `Flow agent error: ${err.message}`, { snippet: err.snippet });
     }
     const planCount = await page.locator('text=/frame \\d|scene \\d|ready to go|move on|generating the visual|proceed/i').count();
     if (planCount > 0) {
@@ -375,8 +383,9 @@ async function waitForVideos(page, timeoutMs, pollMs) {
   const start = Date.now();
   let lastCount = 0;
   while (Date.now() - start < timeoutMs) {
-    if (await detectAgentError(page)) {
-      throw new FlowError('AGENT_ERROR', 'Agent errored while generating videos.');
+    const err = await detectAgentError(page);
+    if (err) {
+      throw new FlowError('AGENT_ERROR', `Agent errored while generating videos: ${err.message}`, { snippet: err.snippet });
     }
     const uuids = await extractVideoUuids(page);
     if (uuids.length > lastCount) {
@@ -435,23 +444,48 @@ export async function generateVideo({ browser, config, prompt, aspectRatio = '16
   }
   await sleep(1000);
 
-  await sendChatMessage(page, prompt);
-  logger.info('prompt sent, waiting for agent plan');
+  // Outer retry: if Flow's agent errors with "Something went wrong",
+  // click "Try again" button (or recreate project + resend) up to 3 times.
+  let files = [];
+  for (let attempt = 1; attempt <= 3; attempt += 1) {
+    try {
+      await sendChatMessage(page, prompt);
+      logger.info('prompt sent, waiting for agent plan', { attempt });
 
-  const planOk = await waitForPlanResponse(page, 180000);
-  if (!planOk) {
-    throw new FlowError('PLAN_TIMEOUT', 'Agent did not produce a storyboard plan within 3 minutes');
+      const planOk = await waitForPlanResponse(page, 180000);
+      if (!planOk) {
+        throw new FlowError('PLAN_TIMEOUT', 'Agent did not produce a storyboard plan within 3 minutes');
+      }
+      await sleep(2000);
+
+      // Send confirmation to trigger video generation
+      await sendChatMessage(page, 'Looks great. Please generate the videos now.');
+      logger.info('confirmation sent, waiting for videos', { attempt });
+
+      // Video generation can take 1-5 min per scene
+      const videoTimeoutMs = Math.max(config.generationTimeoutMs, 480000);
+      const uuids = await waitForVideos(page, videoTimeoutMs, config.pollIntervalMs);
+      files = await downloadVideosFromPage(page, uuids, outDir, jobId);
+      break;
+    } catch (e) {
+      if (e.code !== 'AGENT_ERROR' || attempt === 3) throw e;
+      logger.warn('agent error, trying Try again button', { attempt, err: e.message });
+      // Try clicking the "Try again" button in-place first
+      const tryAgain = page.locator('button:has-text("Try again")').first();
+      const tryAgainOk = (await tryAgain.count()) > 0
+        ? await tryAgain.click({ timeout: 3000 }).then(() => true).catch(() => false)
+        : false;
+      if (tryAgainOk) {
+        await sleep(2000);
+        continue;
+      }
+      // Fallback: re-navigate to a fresh project
+      await goToNewProject(page, config.flowUrl);
+      await configureVideoDefaults(page, aspectRatio, count);
+      await clickStoryboardChip(page).catch(() => {});
+      await sleep(2000);
+    }
   }
-  await sleep(2000);
-
-  // Send confirmation to trigger video generation
-  await sendChatMessage(page, 'Looks great. Please generate the videos now.');
-  logger.info('confirmation sent, waiting for videos');
-
-  // Video generation can take 1-5 min per scene
-  const videoTimeoutMs = Math.max(config.generationTimeoutMs, 480000);
-  const uuids = await waitForVideos(page, videoTimeoutMs, config.pollIntervalMs);
-  const files = await downloadVideosFromPage(page, uuids, outDir, jobId);
 
   if (files.length === 0) {
     throw new FlowError('VIDEO_DOWNLOAD_FAILED', 'Videos were generated but download failed');
