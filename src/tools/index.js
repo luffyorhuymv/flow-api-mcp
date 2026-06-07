@@ -5,8 +5,8 @@ export const toolDefinitions = [
     name: 'generate_image',
     description:
       'Generate an image using Google Labs Flow (Nano Banana 2/Pro or Imagen 4). ' +
-      'Returns absolute file paths to the saved images. Requires an active Google session ' +
-      '(run `npx flow-api login` once first to authenticate).',
+      'Returns absolute file paths to the saved images, plus the projectId for reuse in subsequent calls. ' +
+      'Requires an active Google session (run `npx flow-api login` once first to authenticate).',
     inputSchema: {
       type: 'object',
       properties: {
@@ -28,6 +28,12 @@ export const toolDefinitions = [
         output_dir: {
           type: 'string',
           description: 'Override output directory for this generation.',
+        },
+        project_id: {
+          type: 'string',
+          description:
+            'Reuse an existing Flow project (UUID). Skip to create a new project every call. ' +
+            'Pass the projectId returned by a previous generate_image call to keep all images in one project.',
         },
       },
       required: ['prompt'],

@@ -34,6 +34,7 @@ export async function handleToolCall(name, args, config) {
           model: args.model,
           aspectRatio: args.aspect_ratio,
           outputDir: args.output_dir,
+          projectId: args.project_id,
         });
         return {
           content: [{

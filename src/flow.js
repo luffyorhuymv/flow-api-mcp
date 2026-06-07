@@ -70,6 +70,30 @@ async function goToNewProject(page, flowUrl) {
   return url;
 }
 
+const PROJECT_ID_RE = /^[a-f0-9-]{8,}$/i;
+
+async function goToProject(page, projectId, flowUrl) {
+  if (!projectId || !PROJECT_ID_RE.test(projectId)) {
+    throw new FlowError('INVALID_PROJECT_ID', `project_id must be a UUID-like string, got: ${projectId}`);
+  }
+  const url = `${flowUrl.replace(/\/$/, '')}/project/${projectId}`;
+  logger.info('navigating to existing project', { projectId, url });
+  await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 });
+  await detectLoginWall(page);
+  await page.waitForLoadState('networkidle', { timeout: 10000 }).catch(() => {});
+  const finalUrl = page.url();
+  if (!finalUrl.includes(projectId)) {
+    throw new FlowError('PROJECT_NOT_FOUND', `Could not open project ${projectId} (landed on ${finalUrl})`);
+  }
+  logger.info('inside existing project', { url: finalUrl });
+  return finalUrl;
+}
+
+function extractProjectId(url) {
+  const m = url.match(/\/project\/([a-f0-9-]+)/i);
+  return m ? m[1] : null;
+}
+
 async function switchToImageMode(page) {
   const imagesTab = page.locator('button:has-text("Images"), [role="tab"]:has-text("Images")').first();
   try {
@@ -199,7 +223,7 @@ async function waitForNewImages(page, baselineUuids, timeoutMs, pollMs) {
   throw new FlowError('GENERATION_TIMEOUT', `No new images after ${Math.round(timeoutMs / 1000)}s`);
 }
 
-export async function generateImage({ browser, config, prompt, model, aspectRatio, outputDir }) {
+export async function generateImage({ browser, config, prompt, model, aspectRatio, outputDir, projectId }) {
   if (!prompt || typeof prompt !== 'string') {
     throw new FlowError('INVALID_PROMPT', 'Prompt must be a non-empty string');
   }
@@ -208,9 +232,13 @@ export async function generateImage({ browser, config, prompt, model, aspectRati
   ensureDir(outDir);
 
   const jobId = randomUUID().slice(0, 8);
-  logger.info('job start', { jobId, prompt: prompt.slice(0, 80), model, aspectRatio });
+  logger.info('job start', { jobId, prompt: prompt.slice(0, 80), model, aspectRatio, projectId });
 
-  await goToNewProject(page, config.flowUrl);
+  if (projectId) {
+    await goToProject(page, projectId, config.flowUrl);
+  } else {
+    await goToNewProject(page, config.flowUrl);
+  }
   await switchToImageMode(page);
   await selectAspectRatio(page, aspectRatio);
   await fillPrompt(page, prompt);
@@ -227,12 +255,14 @@ export async function generateImage({ browser, config, prompt, model, aspectRati
     throw new FlowError('DOWNLOAD_FAILED', 'Images were generated but download failed');
   }
 
-  logger.info('job done', { jobId, count: files.length });
+  const finalProjectId = extractProjectId(page.url());
+  logger.info('job done', { jobId, count: files.length, projectId: finalProjectId });
   return {
     jobId,
     model: model || 'nano-banana-2',
     aspectRatio: aspectRatio || 'default',
     prompt,
+    projectId: finalProjectId,
     files: files.map((f) => ({ path: f.path, bytes: f.bytes, uuid: f.uuid })),
   };
 }
