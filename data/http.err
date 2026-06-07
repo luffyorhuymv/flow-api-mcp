@@ -1,0 +1,10 @@
+[07:27:23] INFO  http MCP server listening {"url":"http://127.0.0.1:5555/mcp","health":"http://127.0.0.1:5555/health","auth":"none"}
+[07:30:23] INFO  http MCP server listening {"url":"http://127.0.0.1:5555/mcp","health":"http://127.0.0.1:5555/health","auth":"none"}
+[07:33:50] INFO  mcp session opened {"sessionId":"d6d81be7-00b6-4564-b662-69bf11d3fb20","total":1}
+[07:33:50] INFO  launching persistent browser {"profileDir":"D:\\code\\flow api\\data\\chrome-profile","headed":false}
+[07:33:50] INFO  browser launched {"channel":"chrome","ua":"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+[07:33:54] INFO  job start {"jobId":"21a8bae0","prompt":"a tiny red panda wearing a tiny top hat, portrait, watercolor","aspectRatio":"4:3"}
+[07:33:54] INFO  navigating to Flow {"flowUrl":"https://labs.google/fx/tools/flow"}
+[07:33:56] INFO  clicking New project
+[07:34:00] INFO  inside project {"url":"https://labs.google/fx/tools/flow/project/2cd4a26a-f142-4012-af6b-4605d84e8824"}
+[07:34:00] ERROR flow error {"code":"PROMPT_INPUT_NOT_FOUND","msg":"Could not locate prompt input field"}

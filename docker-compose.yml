@@ -36,6 +36,29 @@ services:
         limits:
           memory: 2G
 
+  # Native HTTP/SSE transport (StreamableHTTP), perfect for Cloudflare Tunnel
+  flow-api-http:
+    profiles: ["http"]
+    build: .
+    container_name: flow-api-http
+    restart: unless-stopped
+    environment:
+      - USE_SYSTEM_CHROME=true
+      - HEADLESS=true
+      - USE_XVFB=false
+      - HTTP_HOST=0.0.0.0
+      - HTTP_AUTH_TOKEN=${HTTP_AUTH_TOKEN:-}
+    command: ["serve-http", "5555"]
+    volumes:
+      - flow-data:/app/data
+      - flow-output:/app/output
+    ports:
+      - "127.0.0.1:5555:5555"
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+
 volumes:
   flow-data:
   flow-output:

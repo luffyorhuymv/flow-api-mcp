@@ -10,6 +10,7 @@
   "scripts": {
     "start": "node bin/flow-api.js serve",
     "serve": "node bin/flow-api.js serve",
+    "serve-http": "node bin/flow-api.js serve-http",
     "login": "node bin/flow-api.js login",
     "status": "node bin/flow-api.js status",
     "import-cookies": "node bin/flow-api.js import-cookies",

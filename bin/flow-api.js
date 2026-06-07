@@ -36,6 +36,7 @@ function usage() {
   console.log('  flow-api import-cookies [f] Import Chrome cookie JSON into profile');
   console.log('  flow-api test "<prompt>"    Generate a single image from CLI');
   console.log('  flow-api serve              Start MCP server (stdio)');
+  console.log('  flow-api serve-http [port]  Start MCP server over HTTP (default :5555)');
   console.log('  flow-api --help             Show this help');
   console.log('');
   console.log('Config: ' + path.join(projectRoot, '.env'));
@@ -89,6 +90,14 @@ async function cmdServe() {
   await import('../src/server.js');
 }
 
+async function cmdServeHttp(port) {
+  const { buildConfig } = await import('../src/handler.js');
+  const { startHttpServer } = await import('../src/http.js');
+  const config = buildConfig(process.env, projectRoot);
+  const host = process.env.HTTP_HOST || '127.0.0.1';
+  startHttpServer({ port: Number(port) || 5555, host, config });
+}
+
 async function cmdImportCookies() {
   await import('./import-cookies.js');
 }
@@ -108,6 +117,7 @@ const cmd = args[0];
       case 'import-cookies': return cmdImportCookies();
       case 'test': return cmdTest(args.slice(1).join(' '));
       case 'serve': return cmdServe();
+      case 'serve-http': return cmdServeHttp(args[1]);
       default:
         console.error('Unknown command: ' + cmd);
         usage();
