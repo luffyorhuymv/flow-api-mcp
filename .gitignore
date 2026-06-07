@@ -1,0 +1,10 @@
+node_modules/
+data/chrome-profile/
+data/cookies-import.json
+data/debug-*.png
+output/*
+!output/.gitkeep
+.env
+*.log
+.DS_Store
+Thumbs.db

@@ -1,0 +1,41 @@
+services:
+  flow-api:
+    build: .
+    image: flow-api-mcp:local
+    container_name: flow-api-mcp
+    restart: unless-stopped
+    environment:
+      - USE_SYSTEM_CHROME=true
+      - HEADLESS=true
+      - USE_XVFB=false
+    volumes:
+      - flow-data:/app/data
+      - flow-output:/app/output
+    stdin_open: true
+    tty: true
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+
+  # Optional service: same image but with Xvfb (use if headless=new gets 403)
+  flow-api-xvfb:
+    profiles: ["xvfb"]
+    image: flow-api-mcp:local
+    environment:
+      - USE_SYSTEM_CHROME=true
+      - HEADLESS=false
+      - USE_XVFB=true
+    volumes:
+      - flow-data:/app/data
+      - flow-output:/app/output
+    stdin_open: true
+    tty: true
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+
+volumes:
+  flow-data:
+  flow-output:

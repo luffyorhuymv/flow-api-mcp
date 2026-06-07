@@ -1,0 +1,45 @@
+{
+  "name": "flow-api-mcp",
+  "version": "1.0.0",
+  "description": "MCP server wrapping Google Labs Flow image generation via Playwright browser automation",
+  "type": "module",
+  "main": "src/server.js",
+  "bin": {
+    "flow-api": "bin/flow-api.js"
+  },
+  "scripts": {
+    "start": "node bin/flow-api.js serve",
+    "serve": "node bin/flow-api.js serve",
+    "login": "node bin/flow-api.js login",
+    "status": "node bin/flow-api.js status",
+    "import-cookies": "node bin/flow-api.js import-cookies",
+    "test": "node bin/flow-api.js test",
+    "test:mcp": "node bin/test-mcp.js",
+    "install:browsers": "playwright install chromium"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.0.4",
+    "dotenv": "^16.4.5",
+    "playwright": "^1.49.0"
+  },
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "google-flow",
+    "image-generation",
+    "playwright",
+    "web2api"
+  ],
+  "files": [
+    "bin",
+    "src",
+    "data/.gitkeep",
+    "output/.gitkeep",
+    ".env.example",
+    "README.md"
+  ],
+  "license": "MIT"
+}
