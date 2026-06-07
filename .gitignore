@@ -2,6 +2,8 @@ node_modules/
 data/chrome-profile/
 data/cookies-import.json
 data/debug-*.png
+data/http*.log
+data/http*.err
 output/*
 !output/.gitkeep
 .env
