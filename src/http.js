@@ -4,7 +4,8 @@ import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { CallToolRequestSchema, ListToolsRequestSchema } from '@modelcontextprotocol/sdk/types.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import { toolDefinitions, handleToolCall } from './handler.js';
-import { closeBrowser } from './browser.js';
+import { closeBrowser, getBrowser } from './browser.js';
+import { importCookiesIntoContext, getCookieStatus } from './cookie-importer.js';
 import { logger } from './utils/logger.js';
 
 const CORS_HEADERS = {
@@ -12,7 +13,10 @@ const CORS_HEADERS = {
   'Access-Control-Allow-Methods': 'GET, POST, DELETE, OPTIONS',
   'Access-Control-Allow-Headers': 'Content-Type, Mcp-Session-Id, Authorization',
   'Access-Control-Expose-Headers': 'Mcp-Session-Id',
+  'Content-Security-Policy': "default-src 'none'",
 };
+
+const MAX_BODY_BYTES = 5 * 1024 * 1024;
 
 function makeServer(config) {
   const server = new Server(
@@ -33,6 +37,29 @@ function checkAuth(req, expectedToken) {
   return auth === `Bearer ${expectedToken}`;
 }
 
+function readBody(req) {
+  return new Promise((resolve, reject) => {
+    const chunks = [];
+    let total = 0;
+    req.on('data', (c) => {
+      total += c.length;
+      if (total > MAX_BODY_BYTES) {
+        req.destroy();
+        reject(new Error(`body too large (>${MAX_BODY_BYTES} bytes)`));
+        return;
+      }
+      chunks.push(c);
+    });
+    req.on('end', () => resolve(Buffer.concat(chunks).toString('utf-8')));
+    req.on('error', reject);
+  });
+}
+
+function sendJson(res, status, body) {
+  res.writeHead(status, { 'Content-Type': 'application/json', ...CORS_HEADERS });
+  res.end(JSON.stringify(body));
+}
+
 export function startHttpServer({ port = 5555, host = '127.0.0.1', config, authToken }) {
   const transports = new Map();
   const expectedToken = authToken || process.env.HTTP_AUTH_TOKEN || '';
@@ -45,34 +72,63 @@ export function startHttpServer({ port = 5555, host = '127.0.0.1', config, authT
     }
 
     if (!checkAuth(req, expectedToken)) {
-      res.writeHead(401, { 'Content-Type': 'application/json', ...CORS_HEADERS });
-      res.end(JSON.stringify({ error: 'unauthorized' }));
+      sendJson(res, 401, { error: 'unauthorized' });
       return;
     }
 
     const url = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
 
-    if (url.pathname === '/health' || url.pathname === '/') {
-      res.writeHead(200, { 'Content-Type': 'application/json', ...CORS_HEADERS });
-      res.end(JSON.stringify({
-        ok: true,
-        service: 'flow-api-mcp',
-        version: '1.0.0',
-        sessions: transports.size,
-        uptime: Math.floor(process.uptime()),
-      }));
-      return;
-    }
-
-    if (url.pathname !== '/mcp') {
-      res.writeHead(404, { 'Content-Type': 'application/json', ...CORS_HEADERS });
-      res.end(JSON.stringify({ error: 'not found', try: '/health or /mcp' }));
-      return;
-    }
-
-    const sessionId = req.headers['mcp-session-id'];
-
     try {
+      if (url.pathname === '/health' || url.pathname === '/') {
+        const status = { ok: true, service: 'flow-api-mcp', version: '1.0.0', sessions: transports.size, uptime: Math.floor(process.uptime()) };
+        try {
+          const browser = getBrowser(config);
+          await browser.launch({ headed: false });
+          status.cookies = await getCookieStatus(browser.context);
+        } catch (e) {
+          status.cookies = null;
+          status.cookieError = e.message;
+        }
+        sendJson(res, 200, status);
+        return;
+      }
+
+      if (url.pathname === '/admin/import-cookies' && req.method === 'POST') {
+        const raw = await readBody(req);
+        let cookies;
+        try {
+          cookies = JSON.parse(raw);
+        } catch (e) {
+          sendJson(res, 400, { error: 'invalid JSON: ' + e.message });
+          return;
+        }
+        if (!Array.isArray(cookies)) {
+          sendJson(res, 400, { error: 'body must be a JSON array of Chrome cookie objects' });
+          return;
+        }
+        const browser = getBrowser(config);
+        await browser.launch({ headed: false });
+        const result = await importCookiesIntoContext(browser.context, cookies);
+        logger.info('cookies imported via /admin/import-cookies', { imported: result.imported, skipped: result.skipped });
+        sendJson(res, 200, { ok: true, ...result, source: 'http', receivedAt: new Date().toISOString() });
+        return;
+      }
+
+      if (url.pathname === '/admin/cookie-status' && req.method === 'GET') {
+        const browser = getBrowser(config);
+        await browser.launch({ headed: false });
+        const status = await getCookieStatus(browser.context);
+        sendJson(res, 200, { ok: true, ...status });
+        return;
+      }
+
+      if (url.pathname !== '/mcp') {
+        sendJson(res, 404, { error: 'not found', routes: ['/health', '/mcp', '/admin/import-cookies', '/admin/cookie-status'] });
+        return;
+      }
+
+      const sessionId = req.headers['mcp-session-id'];
+
       if (sessionId && transports.has(sessionId)) {
         const transport = transports.get(sessionId);
         await transport.handleRequest(req, res);
@@ -99,14 +155,10 @@ export function startHttpServer({ port = 5555, host = '127.0.0.1', config, authT
         return;
       }
 
-      res.writeHead(400, { 'Content-Type': 'application/json', ...CORS_HEADERS });
-      res.end(JSON.stringify({ error: 'invalid request: provide Mcp-Session-Id header or send initialize as POST' }));
+      sendJson(res, 400, { error: 'invalid request: provide Mcp-Session-Id header or send initialize as POST' });
     } catch (err) {
       logger.error('http handler error', { err: err.message, stack: err.stack });
-      if (!res.headersSent) {
-        res.writeHead(500, { 'Content-Type': 'application/json', ...CORS_HEADERS });
-        res.end(JSON.stringify({ error: err.message }));
-      }
+      if (!res.headersSent) sendJson(res, 500, { error: err.message });
     }
   });
 
@@ -114,6 +166,7 @@ export function startHttpServer({ port = 5555, host = '127.0.0.1', config, authT
     logger.info('http MCP server listening', {
       url: `http://${host}:${port}/mcp`,
       health: `http://${host}:${port}/health`,
+      admin: `http://${host}:${port}/admin/import-cookies`,
       auth: expectedToken ? 'bearer-token-required' : 'none',
     });
   });
